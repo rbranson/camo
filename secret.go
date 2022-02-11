@@ -5,31 +5,40 @@ import (
 	"unsafe"
 )
 
-// Secret is secret data that cannot be inspected via general reflection code,
+// Secret is secret data that cannot be inspected via reflection techniques,
 // which is useful for preventing secret data from accidental serialization
 // and storage or transfer over the wire. It is immutable and therefore
 // concurrency-safe.
 //
-// Just to be clear, this isn't a hard constraint. Truly malicious code still
-// has access to this memory, and of course could still call the method which
+// Just to be clear, this isn't a hard constraint. While it will thwart a
+// well-intentioned developer, even if they are using "unsanctioned" reflection
+// such as those used by the go-spew package, truly malicious code still has
+// access to this memory, and of course could still call the method which
 // returns the underlying data.
 //
 // The zero value of this type is intentionally distinguishable from an empty
 // secret, so that empty secrets to not appear as a form of null when
 // reflection code inspects the data structure.
+//
+// Another thing to note about the zero value is that the "reveal" methods
+// will panic. Other methods such as comparisons will not. This is analogous
+// to the behavior of nil.
 type Secret struct {
 	// Using an unsafe.Pointer "erases" the type of the underlying data as it
-	// is only "known" by the code in this package. To any code using
-	// reflection, this will only appear to be an opaque memory address.
+	// is only "known" by the code in this package. While reflection already
+	// won't stumble across this field, commonly used packages like go-spew
+	// use various hacks to peer into unexported fields, which this will
+	// thwart.
 	p unsafe.Pointer
 }
 
-func Obscure(contents []byte) Secret {
+// Obscure copies the data in content into a new Secret.
+func Obscure(content []byte) Secret {
 	// Make a copy to force immutability. This also means that Secrets with
-	// empty contents will look like a pointer to a valid object, to avoid
+	// empty content will look like a pointer to a valid object, to avoid
 	// being able to distinguish empty secrets in any emitted output.
-	buf := make([]byte, len(contents))
-	copy(buf, contents)
+	buf := make([]byte, len(content))
+	copy(buf, content)
 	return Secret{
 		p: unsafe.Pointer(&buf),
 	}
@@ -40,10 +49,11 @@ func (s Secret) deref() []byte {
 	return *(*[]byte)(s.p)
 }
 
-// Reveal returns a copy of the secret contents, or nil if a zero value
+// Reveal returns a copy of the secret content. This method panics for a zero
+// value.
 func (s Secret) Reveal() []byte {
 	if s.p == nil {
-		return nil
+		panic("cannot reveal a zero secret")
 	}
 	cont := s.deref()
 	buf := make([]byte, len(cont))
@@ -51,17 +61,17 @@ func (s Secret) Reveal() []byte {
 	return buf
 }
 
-// RevealCopy copies the secret contents into dst and returns the number
-// of bytes written.
+// RevealCopy copies the secret's content into dst and returns the number of
+// bytes written. This method panics for a zero value.
 func (s Secret) RevealCopy(dst []byte) int {
 	if s.p == nil {
-		return 0
+		panic("cannot reveal a zero secret")
 	}
 	cont := s.deref()
 	return copy(dst, cont)
 }
 
-// Equal reports whether other's contents are equal to this secret, *OR* if
+// Equal reports whether other's content are equal to this secret, *OR* if
 // both of the secrets are zero value.
 func (s Secret) Equal(other Secret) bool {
 	if s.p == other.p {

@@ -1,7 +1,6 @@
 package camo
 
 import (
-	"fmt"
 	"reflect"
 	"strconv"
 	"testing"
@@ -9,15 +8,12 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-func ptreq(a interface{}, b interface{}) bool {
-	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
-}
-
-func obscure(contents []byte) *Secret {
-	v := Obscure(contents)
-	return &v
-}
-
+// value copies the value from in to out and returns true, unless in is nil, in
+// which case it does nothing and returns false. Both in and out must be
+// pointers of the same type, but just to be clear, this does not copy the
+// pointers, it copies the values. out can't be nil, and it must be "settable"
+// i.e. it can't point to a const value etc. This will panic on any violation
+// of these constraints.
 func value(in interface{}, out interface{}) bool {
 	if in == nil {
 		return false
@@ -55,7 +51,20 @@ func value(in interface{}, out interface{}) bool {
 	return true
 }
 
+// ptreq returns true if a and b are equal pointers.
+func ptreq(a interface{}, b interface{}) bool {
+	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
+}
+
 func TestSecret(t *testing.T) {
+	obscure := func(contents []byte) *Secret {
+		v := Obscure(contents)
+		if v.p == nil {
+			t.Fatal("Obscure should never result in a zero value")
+		}
+		return &v
+	}
+
 	sec1 := Obscure([]byte{1, 2, 3})
 	sec1copy := sec1
 
@@ -75,6 +84,12 @@ func TestSecret(t *testing.T) {
 		greaterThan *Secret
 		copy        *copyCase
 	}{
+		{
+			name:     "zero value",
+			equalTo:  &zero,
+			nequalTo: obscure(nil),
+			lessThan: obscure(nil),
+		},
 		{
 			name:        "nil contents",
 			base:        Obscure(nil),
@@ -155,12 +170,8 @@ func TestSecret(t *testing.T) {
 		},
 	}
 
-	for i, tc := range cases {
-		t.Run(fmt.Sprintf("(%d)%s", i, tc.name), func(t *testing.T) {
-			if tc.base.p == nil {
-				t.Fatal("Obscure should never result in a null pointer")
-			}
-
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			if tc.reveals != nil {
 				reveals := tc.base.Reveal()
 				if diff := cmp.Diff(tc.reveals, reveals); diff != "" {
@@ -249,9 +260,67 @@ func TestObscureDoesNotRepeatPointers(t *testing.T) {
 			for ai, a := range secrets {
 				for bi, b := range secrets {
 					if ai != bi && a.p == b.p {
-						t.Fatalf("Obscure produced the same pointer twice for input %v", tc)
+						t.Errorf("Obscure produced the same pointer twice for input %v", tc)
+						return
 					}
 				}
+			}
+		})
+	}
+}
+
+// capturePanic executes f and if it panics, it return the value passed to
+// panic and true, otherwise it returns a nil value and false.
+func capturePanic(f func()) (interface{}, bool) {
+	var recovered interface{}
+	var ok bool
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = r
+				ok = true
+			}
+		}()
+		f()
+	}()
+
+	return recovered, ok
+}
+
+func TestRevealMethodsPanicOnZeroValue(t *testing.T) {
+	cases := []struct {
+		name       string
+		panicValue interface{}
+		f          func(s Secret)
+	}{
+		{
+			name:       "Reveal method",
+			panicValue: "cannot reveal a zero secret",
+			f: func(s Secret) {
+				_ = s.Reveal()
+			},
+		},
+		{
+			name:       "RevealCopy method",
+			panicValue: "cannot reveal a zero secret",
+			f: func(s Secret) {
+				_ = s.RevealCopy([]byte{})
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pv, ok := capturePanic(func() {
+				tc.f(Secret{})
+			})
+			if !ok {
+				t.Error("expected function to panic")
+				return
+			}
+			if pv != tc.panicValue {
+				t.Errorf("expected panic value of %v, got %v", tc.panicValue, pv)
 			}
 		})
 	}
