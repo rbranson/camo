@@ -1,14 +1,26 @@
+// Package camo provides the Secret type, which is a comparable, immutable
+// wrapper around a string or byte slice that is opaque to reflection, making
+// it useful for preventing secret data (such as passwords and API keys) from
+// accidental serialization and storage or transfer over the wire.
 package camo
 
 import (
 	"bytes"
+	"fmt"
+	"hash/maphash"
 	"unsafe"
 )
 
+// Obscurable is the set of types that can be obscured by the Secret type.
+type Obscurable interface {
+	string | []byte
+}
+
+var hashSeed = maphash.MakeSeed()
+
 // Secret is secret data that cannot be inspected via reflection techniques,
 // which is useful for preventing secret data from accidental serialization
-// and storage or transfer over the wire. It is immutable and therefore
-// concurrency-safe.
+// and storage or transfer over the wire.
 //
 // Just to be clear, this isn't a hard constraint. While it will thwart a
 // well-intentioned developer, even if they are using "unsanctioned" reflection
@@ -17,83 +29,86 @@ import (
 // returns the underlying data.
 //
 // The zero value of this type is intentionally distinguishable from an empty
-// secret, so that empty secrets to not appear as a form of null when
+// secret, so that empty secrets do not appear as a form of null when
 // reflection code inspects the data structure.
 //
-// Another thing to note about the zero value is that the "reveal" methods
-// will panic. Other methods such as comparisons will not. This is analogous
-// to the behavior of nil.
-type Secret struct {
+// Another thing to note about the zero value is that the Reveal and Append
+// methods will panic. Other methods such as comparisons will not. This is
+// analogous to the behavior of nil.
+//
+// It is immutable, so it is safe to pass around by value.
+//
+// It is comparable, so it can be used as a map key.
+type Secret[O Obscurable] struct {
+	_ unsafe.Pointer
+
+	hash uint64
+}
+
+type secret struct {
 	// Using an unsafe.Pointer "erases" the type of the underlying data as it
 	// is only "known" by the code in this package. While reflection already
 	// won't stumble across this field, commonly used packages like go-spew
 	// use various hacks to peer into unexported fields, which this will
 	// thwart.
-	p unsafe.Pointer
+	p    unsafe.Pointer
+	hash uint64
 }
 
-// Obscure copies the data in content into a new Secret.
-func Obscure(content []byte) Secret {
+// Obscure returns a Secret that wraps the given content. The content must be a
+// string or byte slice. If a byte slice is given it will be copied into a
+// newly allocated byte slice owned by the Secret.
+func Obscure[O Obscurable](content O) Secret[O] {
 	// Make a copy to force immutability. This also means that Secrets with
 	// empty content will look like a pointer to a valid object, to avoid
 	// being able to distinguish empty secrets in any emitted output.
-	buf := make([]byte, len(content))
-	copy(buf, content)
-	return Secret{
-		p: unsafe.Pointer(&buf),
+	str := string(content)
+	s := secret{
+		p:    unsafe.Pointer(&str),
+		hash: maphash.String(hashSeed, str),
+	}
+	return *(*Secret[O])(unsafe.Pointer(&s))
+}
+
+// Valid reports if the Secret is valid.
+func (s Secret[O]) Valid() bool {
+	ss := s.secret()
+	return ss.p != nil
+}
+
+func (s Secret[O]) secret() secret {
+	return *(*secret)(unsafe.Pointer(&s))
+}
+
+func (s Secret[O]) deref() O {
+	ss := s.secret()
+	return *(*O)(ss.p)
+}
+
+// Reveal returns the underlying secret data. If the secret is a byte slice,
+// then a copy of the byte slice is returned. If the secret is a string, then
+// the string is returned. It panics if the secret is zero.
+func (s Secret[O]) Reveal() O {
+	ss := s.secret()
+	if ss.p == nil {
+		panic("illegal use of Reveal on a zero secret")
+	}
+	switch v := any(s.deref()).(type) {
+	case string:
+		return O(v)
+	case []byte:
+		return O(bytes.Clone(v))
+	default:
+		panic(fmt.Sprintf("illegal type %T", v))
 	}
 }
 
-// this will panic if it's null (avoids double checking in most cases)
-func (s Secret) deref() []byte {
-	return *(*[]byte)(s.p)
-}
-
-// Reveal returns a copy of the secret content. This method panics for a zero
-// value.
-func (s Secret) Reveal() []byte {
-	if s.p == nil {
-		panic("cannot reveal a zero secret")
+// AppendTo appends the secret to the byte slice, and returns the updated
+// slice. It panics if the secret is zero.
+func (s Secret[O]) AppendTo(dst []byte) []byte {
+	ss := s.secret()
+	if ss.p == nil {
+		panic("illegal use of AppendTo on a zero secret")
 	}
-	cont := s.deref()
-	buf := make([]byte, len(cont))
-	copy(buf, cont)
-	return buf
-}
-
-// RevealCopy copies the secret's content into dst and returns the number of
-// bytes written. This method panics for a zero value.
-func (s Secret) RevealCopy(dst []byte) int {
-	if s.p == nil {
-		panic("cannot reveal a zero secret")
-	}
-	cont := s.deref()
-	return copy(dst, cont)
-}
-
-// Equal reports whether other's content are equal to this secret, *OR* if
-// both of the secrets are zero value.
-func (s Secret) Equal(other Secret) bool {
-	if s.p == other.p {
-		return true // covers both-nils case
-	}
-	if s.p == nil || other.p == nil {
-		return false
-	}
-	return bytes.Equal(s.deref(), other.deref())
-}
-
-// Compare returns an integer comparing the two secrets lexicographically. It
-// works identically to bytes.Compare. In the case both secrets are zero values
-// it will return 0.
-func (a Secret) Compare(b Secret) int {
-	switch {
-	case a.p == b.p: // covers both-nils case
-		return 0
-	case a.p == nil:
-		return -1
-	case b.p == nil:
-		return 1
-	}
-	return bytes.Compare(a.deref(), b.deref())
+	return append(dst, s.deref()...)
 }

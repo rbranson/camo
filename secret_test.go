@@ -1,243 +1,99 @@
 package camo
 
 import (
-	"reflect"
+	"bytes"
+	"slices"
 	"strconv"
 	"testing"
-
-	"github.com/google/go-cmp/cmp"
 )
 
-// value copies the value from in to out and returns true, unless in is nil, in
-// which case it does nothing and returns false. Both in and out must be
-// pointers of the same type, but just to be clear, this does not copy the
-// pointers, it copies the values. out can't be nil, and it must be "settable"
-// i.e. it can't point to a const value etc. This will panic on any violation
-// of these constraints.
-func value(in interface{}, out interface{}) bool {
-	if in == nil {
-		return false
-	}
-	if out == nil {
-		panic("out can't be nil")
-	}
-
-	rin := reflect.ValueOf(in)
-	rout := reflect.ValueOf(out)
-
-	// type checks, more specific than necessary to help diagnose common mistakes
-	if rin.Type().Kind() != reflect.Ptr {
-		panic("in must be a pointer")
-	}
-	if rout.Type().Kind() != reflect.Ptr {
-		panic("out must be a pointer")
-	}
-	if rout.Type() != rin.Type() {
-		panic("out type must be the same as in type")
-	}
-
-	// value checks
-	if rout.IsNil() {
-		panic("out can't be nil")
-	}
-	if !rout.Elem().CanSet() {
-		panic("out's value must be mutable")
-	}
-
-	if rin.IsNil() {
-		return false
-	}
-	rout.Elem().Set(rin.Elem())
-	return true
-}
-
-// ptreq returns true if a and b are equal pointers.
-func ptreq(a interface{}, b interface{}) bool {
-	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
+func FuzzSecret(f *testing.F) {
+	f.Add("", []byte(nil))
+	f.Add("1", []byte("1"))
+	f.Add("2", []byte("3"))
+	f.Add("XXXXXXX", []byte{0})
+	f.Fuzz(func(t *testing.T, s string, b []byte) {
+		if !Obscure(s).Valid() {
+			t.Errorf("unexpected invalid Secret from string")
+		}
+		if !Obscure(b).Valid() {
+			t.Errorf("unexpected invalid Secret from []byte")
+		}
+	})
 }
 
 func TestSecret(t *testing.T) {
-	obscure := func(contents []byte) *Secret {
-		v := Obscure(contents)
-		if v.p == nil {
-			t.Fatal("Obscure should never result in a zero value")
-		}
-		return &v
-	}
-
-	sec1 := Obscure([]byte{1, 2, 3})
-	sec1copy := sec1
-
-	var zero Secret
-	type copyCase struct {
-		dst    []byte
-		ret    int
-		expect []byte
-	}
 	cases := []struct {
-		name        string
-		base        Secret
-		reveals     []byte
-		equalTo     *Secret
-		nequalTo    *Secret
-		lessThan    *Secret
-		greaterThan *Secret
-		copy        *copyCase
+		name string
+		base Secret[[]byte]
+		want []byte
 	}{
 		{
-			name:     "zero value",
-			equalTo:  &zero,
-			nequalTo: obscure(nil),
-			lessThan: obscure(nil),
+			name: "nil contents",
+			base: Obscure([]byte(nil)),
+			want: nil,
 		},
 		{
-			name:        "nil contents",
-			base:        Obscure(nil),
-			reveals:     []byte{},
-			equalTo:     obscure(nil),
-			nequalTo:    &zero,
-			lessThan:    obscure([]byte{0}),
-			greaterThan: &zero,
-			copy: &copyCase{
-				dst:    make([]byte, 1),
-				ret:    0,
-				expect: []byte{0},
-			},
+			name: "empty contents",
+			base: Obscure([]byte{}),
+			want: []byte{},
 		},
 		{
-			name:        "empty contents",
-			base:        Obscure([]byte{}),
-			reveals:     []byte{},
-			equalTo:     obscure([]byte{}),
-			nequalTo:    &zero,
-			greaterThan: &zero,
-			copy: &copyCase{
-				dst:    make([]byte, 1),
-				ret:    0,
-				expect: []byte{0},
-			},
+			name: "024",
+			base: Obscure([]byte{0, 2, 4}),
+			want: []byte{0, 2, 4},
 		},
 		{
-			name:    "empty contents eq nil contents",
-			base:    Obscure([]byte{}),
-			equalTo: obscure(nil),
-		},
-		{
-			name:        "024",
-			base:        Obscure([]byte{0, 2, 4}),
-			reveals:     []byte{0, 2, 4},
-			equalTo:     obscure([]byte{0, 2, 4}),
-			nequalTo:    obscure([]byte{0, 2, 5}),
-			lessThan:    obscure([]byte{0, 2, 5}),
-			greaterThan: obscure([]byte{0, 2, 3}),
-			copy: &copyCase{
-				dst:    make([]byte, 3),
-				ret:    3,
-				expect: []byte{0, 2, 4},
-			},
-		},
-		{
-			name:    "same internal pointer eq check",
-			base:    sec1,
-			equalTo: &sec1copy,
-		},
-		{
-			name: "copy to zero buffer",
-			base: Obscure([]byte{0, 1, 2, 3, 4}),
-			copy: &copyCase{
-				dst:    []byte{},
-				ret:    0,
-				expect: []byte{},
-			},
-		},
-		{
-			name: "copy to short buffer",
-			base: Obscure([]byte{0, 1, 2, 3, 4}),
-			copy: &copyCase{
-				dst:    make([]byte, 3),
-				ret:    3,
-				expect: []byte{0, 1, 2},
-			},
-		},
-		{
-			name: "copy to long buffer",
-			base: Obscure([]byte{0, 1, 2, 3, 4}),
-			copy: &copyCase{
-				dst:    make([]byte, 7),
-				ret:    5,
-				expect: []byte{0, 1, 2, 3, 4, 0, 0},
-			},
+			name: "foo",
+			base: Obscure([]byte("foo")),
+			want: []byte("foo"),
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.reveals != nil {
-				reveals := tc.base.Reveal()
-				if diff := cmp.Diff(tc.reveals, reveals); diff != "" {
-					t.Errorf("Reveal() mismatch:\n%s", diff)
-				}
-				if rev2 := tc.base.Reveal(); cap(reveals) > 0 && ptreq(reveals, tc.base.Reveal()) {
-					// Go spec for slices means that non-zero-capacity slices are essentially immutable
-					t.Errorf("Reveal() should never return the same cap>0 slice twice (%p == %p)", reveals, rev2)
-				}
+			if !tc.base.Valid() {
+				panic("invalid Secret in test case")
 			}
-
-			var s Secret
-			if ok := value(tc.equalTo, &s); ok {
-				if !tc.base.Equal(s) {
-					t.Error("Equal does not match against equalTo")
-				}
-				if x := tc.base.Compare(s); x != 0 {
-					t.Errorf("Expected Compare on equalTo to return 0, got %v", x)
-				}
-			}
-
-			if ok := value(tc.nequalTo, &s); ok {
-				if tc.base.Equal(s) {
-					t.Error("Equal matches against nequalTo and should not")
-				}
-				if x := tc.base.Compare(s); x == 0 {
-					t.Error("Expected Compare on nequalTo to return non-0, got 0")
-				}
-			}
-
-			if ok := value(tc.lessThan, &s); ok {
-				if x := tc.base.Compare(s); x != -1 {
-					t.Errorf("Expected Compare with lessThan to return -1, got %v", x)
-				}
-			}
-
-			if ok := value(tc.greaterThan, &s); ok {
-				if x := tc.base.Compare(s); x != 1 {
-					t.Errorf("Expected Compare with greaterThan to return 1, got %v", x)
-				}
-			}
-
-			if tc.copy != nil {
-				copyN := tc.base.RevealCopy(tc.copy.dst)
-				if copyN != tc.copy.ret {
-					t.Errorf("Expected RevealCopy to return %v, got %v", tc.copy.ret, copyN)
-				}
-				if diff := cmp.Diff(tc.copy.expect, tc.copy.dst); diff != "" {
-					t.Errorf("RevealCopy() mismatch on copyExpect field:\n%s", diff)
-				}
+			got := tc.base.Reveal()
+			if !bytes.Equal(tc.want, got) {
+				t.Errorf("got = %q; want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestObscureAndRevealPerformCopies(t *testing.T) {
-	cont := []byte{1, 2, 3, 4}
-	sec := Obscure(cont)
-	cont[0] = 100
-	rev := sec.Reveal()
-	if diff := cmp.Diff([]byte{1, 2, 3, 4}, rev); diff != "" {
-		t.Errorf("secret content should not have been modified by mutation:\n%s", diff)
+func TestZeroSecretInvalid(t *testing.T) {
+	var zero Secret[[]byte]
+	if zero.Valid() {
+		t.Errorf("expected zero Secret to be invalid")
 	}
-	rev[0] = 100
-	if diff := cmp.Diff([]byte{1, 2, 3, 4}, sec.Reveal()); diff != "" {
-		t.Errorf("secret content should not have been modified by mutation:\n%s", diff)
+}
+
+func TestMapHashDeterminism(t *testing.T) {
+	var last Secret[string]
+	for i := 0; i < 100; i++ {
+		got := Obscure("test")
+		if i > 0 && got != last {
+			t.Errorf("expected got == last")
+		}
+		last = got
+	}
+}
+
+func TestObscureAndRevealPerformCopies(t *testing.T) {
+	in := []byte("foo")
+	want := slices.Clone(in)
+	s := Obscure(in)
+	in[0] = 100
+	got := s.Reveal()
+	if !bytes.Equal(s.Reveal(), got) {
+		t.Errorf("secret content should not have been modified by mutation: %q != %q", "foo", got)
+	}
+
+	got[0] = 100
+	if got := s.Reveal(); !bytes.Equal(got, want) {
+		t.Errorf("secret content should not have been modified by mutation: %q != %q", "foo", got)
 	}
 }
 
@@ -251,7 +107,7 @@ func TestObscureDoesNotRepeatPointers(t *testing.T) {
 	}
 	for i, tc := range cases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			secrets := []Secret{}
+			secrets := []Secret[[]byte]{}
 			for i := 0; i < 1000; i++ {
 				// This is only "interesting" if references are held for the lifetime of the run,
 				// so don't just like convert these to serialized pointer strings or something
@@ -259,7 +115,7 @@ func TestObscureDoesNotRepeatPointers(t *testing.T) {
 			}
 			for ai, a := range secrets {
 				for bi, b := range secrets {
-					if ai != bi && a.p == b.p {
+					if ai != bi && a.secret().p == b.secret().p {
 						t.Errorf("Obscure produced the same pointer twice for input %v", tc)
 						return
 					}
@@ -269,10 +125,34 @@ func TestObscureDoesNotRepeatPointers(t *testing.T) {
 	}
 }
 
+func TestPanicOnZeroReveal(t *testing.T) {
+	var zero Secret[string]
+	_, ok := capturePanic(func() { zero.Reveal() })
+	if !ok {
+		t.Errorf("expected zero.Reveal() to panic")
+	}
+}
+
+func TestPanicOnZeroAppend(t *testing.T) {
+	var zero Secret[string]
+	_, ok := capturePanic(func() { zero.AppendTo(nil) })
+	if !ok {
+		t.Errorf("expected zero.Reveal() to panic")
+	}
+}
+
+func TestAppendTo(t *testing.T) {
+	got := Obscure("bar").AppendTo([]byte("foo"))
+	want := []byte("foobar")
+	if !bytes.Equal(got, want) {
+		t.Errorf("got = %s; want %s", got, want)
+	}
+}
+
 // capturePanic executes f and if it panics, it return the value passed to
 // panic and true, otherwise it returns a nil value and false.
-func capturePanic(f func()) (interface{}, bool) {
-	var recovered interface{}
+func capturePanic(f func()) (any, bool) {
+	var recovered any
 	var ok bool
 
 	func() {
@@ -286,42 +166,4 @@ func capturePanic(f func()) (interface{}, bool) {
 	}()
 
 	return recovered, ok
-}
-
-func TestRevealMethodsPanicOnZeroValue(t *testing.T) {
-	cases := []struct {
-		name       string
-		panicValue interface{}
-		f          func(s Secret)
-	}{
-		{
-			name:       "Reveal method",
-			panicValue: "cannot reveal a zero secret",
-			f: func(s Secret) {
-				_ = s.Reveal()
-			},
-		},
-		{
-			name:       "RevealCopy method",
-			panicValue: "cannot reveal a zero secret",
-			f: func(s Secret) {
-				_ = s.RevealCopy([]byte{})
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			pv, ok := capturePanic(func() {
-				tc.f(Secret{})
-			})
-			if !ok {
-				t.Error("expected function to panic")
-				return
-			}
-			if pv != tc.panicValue {
-				t.Errorf("expected panic value of %v, got %v", tc.panicValue, pv)
-			}
-		})
-	}
 }
